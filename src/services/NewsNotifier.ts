@@ -67,6 +67,11 @@ export class NewsNotifier {
         // We only update if it's new, hash changed, OR if we are missing the raw_markdown (migration case)
         if (isGloballyNew || globalNews?.content_hash !== currentContentHash || !globalNews.raw_markdown) {
             
+            // Log the reason for update
+            if (globalNews?.content_hash !== currentContentHash) {
+                this.logger.info(`Hash Changed for ${item.title}: ${globalNews?.content_hash} -> ${currentContentHash}`);
+            }
+
              // Formatting for storage (optional, but good for debugging or future web view)
              // We'll store the raw text representation or just rely on re-fetching/re-formatting for now?
              // The requirement said "store markdown".
@@ -139,11 +144,13 @@ export class NewsNotifier {
                             });
                         }
                     }
-                } catch (error) {
-                    this.logger.warn(`更新訊息失敗 (可能已刪除): ${error}`);
-                    // If message is deleted, do we re-send? 
-                    // Usually safer NOT to spam, unless user explicitly requested.
-                    // For now, let's leave it. If they want it back, they'd likely need to unbind/bind or we implement a "re-sync" command.
+                } catch (error: any) {
+                    if (error.code === 50001 || error.code === 10003 || error.code === 50013) {
+                         this.logger.warn(`Removing invalid channel ${channelId} (Error: ${error.code}) from guild ${guildId}`);
+                         database.removeChannel(guildId, channelId);
+                    } else {
+                        this.logger.warn(`更新訊息失敗 (可能已刪除): ${error}`);
+                    }
                 }
             }
         } else {
@@ -173,8 +180,13 @@ export class NewsNotifier {
                         
                         await new Promise(resolve => setTimeout(resolve, 500)); // Rate limit
                     }
-                } catch (error) {
-                    this.logger.error(`發送通知至頻道 ${channelId} 失敗：${error}`);
+                } catch (error: any) {
+                    if (error.code === 50001 || error.code === 10003 || error.code === 50013) {
+                        this.logger.warn(`Removing invalid channel ${channelId} (Error: ${error.code}) from guild ${guildId}`);
+                        database.removeChannel(guildId, channelId);
+                    } else {
+                         this.logger.error(`發送通知至頻道 ${channelId} 失敗：${error}`);
+                    }
                 }
             } else {
                 // Determine why we are skipping to log it (debug)

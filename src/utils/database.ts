@@ -153,6 +153,26 @@ export const database = {
         }));
     },
 
+    removeChannel: (guildId: string, channelId: string) => {
+        const channels = database.getNewsChannels(guildId);
+        const newChannels = channels.filter(id => id !== channelId);
+        database.setNewsChannels(guildId, newChannels);
+        
+        // Also remove dispatch history for this channel to keep DB clean
+        const stmt = db.prepare('DELETE FROM news_dispatches WHERE channel_id = ?');
+        stmt.run(channelId);
+    },
+
+    removeGuild: (guildId: string) => {
+        const stmtConfig = db.prepare('DELETE FROM guild_config WHERE guild_id = ?');
+        const stmtDispatch = db.prepare('DELETE FROM news_dispatches WHERE guild_id = ?');
+        
+        db.transaction(() => {
+            stmtConfig.run(guildId);
+            stmtDispatch.run(guildId);
+        })();
+    },
+
     // Global News Methods
     upsertGlobalNews: (item: GlobalNewsItem) => {
         const stmt = db.prepare(`

@@ -1,0 +1,209 @@
+import Database from 'better-sqlite3';
+import path from 'path';
+import fs from 'fs';
+
+const dbPath = path.resolve(process.cwd(), 'data.sqlite');
+const db = new Database(dbPath);
+
+// Initialize tables
+db.exec(`
+    CREATE TABLE IF NOT EXISTS guild_config (
+        guild_id TEXT PRIMARY KEY,
+        news_channels TEXT -- JSON array of channel IDs
+    );
+    
+    -- New Normalized Schema
+    CREATE TABLE IF NOT EXISTS global_news (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        url TEXT,
+        raw_markdown TEXT,
+        content_hash TEXT,
+        published_at INTEGER,
+        last_updated INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS news_dispatches (
+        news_id TEXT,
+        guild_id TEXT,
+        channel_id TEXT,
+        message_id TEXT,
+        last_hash TEXT,
+        PRIMARY KEY (news_id, channel_id),
+        FOREIGN KEY(news_id) REFERENCES global_news(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS news_state (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+`);
+
+// Migration 1: Schema Normalization (tracked_news -> global_news + news_dispatches)
+try {
+    const tableInfo = db.prepare("PRAGMA table_info(tracked_news)").all();
+    if (tableInfo.length > 0) {
+        console.log('Migrating tracked_news to new normalized schema...');
+        const oldNews = db.prepare('SELECT * FROM tracked_news').all() as any[];
+
+        const insertNews = db.prepare(`
+            INSERT OR IGNORE INTO global_news (id, title, raw_markdown, content_hash, published_at, last_updated, url)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        `);
+        
+        const insertDispatch = db.prepare(`
+            INSERT OR IGNORE INTO news_dispatches (news_id, guild_id, channel_id, message_id, last_hash)
+            VALUES (?, ?, ?, ?, ?)
+        `);
+
+        db.transaction(() => {
+            for (const item of oldNews) {
+                // Migrate News Item
+                // Note: We don't have URL or raw_markdown yet, those will be filled on next fetch
+                insertNews.run(
+                    item.id, 
+                    item.title, 
+                    '', // raw_markdown (unknown)
+                    item.content_hash, 
+                    item.timestamp, // published_at
+                    Date.now(), // last_updated
+                    '' // url (unknown)
+                );
+
+                // Migrate Dispatches
+                if (item.posted_messages) {
+                    try {
+                        const postedMap = JSON.parse(item.posted_messages);
+                        for (const [key, val] of Object.entries(postedMap)) {
+                            // key is "guildId:channelId"
+                            const [guildId, channelId] = key.split(':');
+                            
+                            let messageId = '';
+                            let lastHash = '';
+
+                            if (typeof val === 'string') {
+                                messageId = val;
+                            } else if (typeof val === 'object' && val !== null) {
+                                messageId = (val as any).messageId;
+                                lastHash = (val as any).contentHash || item.content_hash;
+                            }
+
+                            if (guildId && channelId && messageId) {
+                                insertDispatch.run(item.id, guildId, channelId, messageId, lastHash);
+                            }
+                        }
+                    } catch (e) {
+                        console.error(`Failed to parse posted_messages for item ${item.id}`, e);
+                    }
+                }
+            }
+            
+            // Rename old table to avoid re-migration
+            db.exec('ALTER TABLE tracked_news RENAME TO tracked_news_backup_migrated');
+        })();
+
+        console.log('Migration to normalized schema complete.');
+    }
+} catch (e: any) {
+    if (!e.message.includes('no such table')) {
+        console.error('Migration failed:', e);
+    }
+}
+
+// Previous Migration Loop (Legacy, kept just in case but likely handled)
+// ... (omitted to cleaner file)
+
+export interface GlobalNewsItem {
+    id: string;
+    title: string;
+    url: string;
+    raw_markdown: string;
+    content_hash: string;
+    published_at: number;
+    last_updated: number;
+}
+
+export interface NewsDispatch {
+    news_id: string;
+    guild_id: string;
+    channel_id: string;
+    message_id: string;
+    last_hash: string;
+}
+
+export const database = {
+    // Guild Config
+    setNewsChannels: (guildId: string, channelIds: string[]) => {
+        const stmt = db.prepare('INSERT OR REPLACE INTO guild_config (guild_id, news_channels) VALUES (?, ?)');
+        stmt.run(guildId, JSON.stringify(channelIds));
+    },
+
+    getNewsChannels: (guildId: string): string[] => {
+        const stmt = db.prepare('SELECT news_channels FROM guild_config WHERE guild_id = ?');
+        const result = stmt.get(guildId) as { news_channels: string } | undefined;
+        return result ? JSON.parse(result.news_channels) : [];
+    },
+
+    getAllNewsChannels: (): { guildId: string, channelIds: string[] }[] => {
+        const stmt = db.prepare('SELECT guild_id, news_channels FROM guild_config');
+        const results = stmt.all() as { guild_id: string, news_channels: string }[];
+        return results.map(r => ({
+            guildId: r.guild_id,
+            channelIds: JSON.parse(r.news_channels)
+        }));
+    },
+
+    // Global News Methods
+    upsertGlobalNews: (item: GlobalNewsItem) => {
+        const stmt = db.prepare(`
+            INSERT INTO global_news (id, title, url, raw_markdown, content_hash, published_at, last_updated)
+            VALUES (@id, @title, @url, @raw_markdown, @content_hash, @published_at, @last_updated)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                url = excluded.url,
+                raw_markdown = excluded.raw_markdown,
+                content_hash = excluded.content_hash,
+                last_updated = excluded.last_updated
+        `);
+        stmt.run(item);
+    },
+
+    getGlobalNews: (id: string): GlobalNewsItem | undefined => {
+        const stmt = db.prepare('SELECT * FROM global_news WHERE id = ?');
+        return stmt.get(id) as GlobalNewsItem | undefined;
+    },
+
+    getRecentGlobalNews: (limit: number = 3): GlobalNewsItem[] => {
+        const stmt = db.prepare('SELECT * FROM global_news ORDER BY id DESC LIMIT ?');
+        return stmt.all(limit) as GlobalNewsItem[];
+    },
+
+    // Dispatch Methods
+    getDispatch: (newsId: string, channelId: string): NewsDispatch | undefined => {
+        const stmt = db.prepare('SELECT * FROM news_dispatches WHERE news_id = ? AND channel_id = ?');
+        return stmt.get(newsId, channelId) as NewsDispatch | undefined;
+    },
+
+    saveDispatch: (dispatch: NewsDispatch) => {
+        const stmt = db.prepare(`
+            INSERT INTO news_dispatches (news_id, guild_id, channel_id, message_id, last_hash)
+            VALUES (@news_id, @guild_id, @channel_id, @message_id, @last_hash)
+            ON CONFLICT(news_id, channel_id) DO UPDATE SET
+                message_id = excluded.message_id,
+                last_hash = excluded.last_hash
+        `);
+        stmt.run(dispatch);
+    },
+
+    // Legacy support / General State
+    setLastServerStatus: (status: string) => {
+        const stmt = db.prepare('INSERT OR REPLACE INTO news_state (key, value) VALUES (?, ?)');
+        stmt.run('last_server_status', status);
+    },
+
+    getLastServerStatus: (): string | undefined => {
+        const stmt = db.prepare('SELECT value FROM news_state WHERE key = ?');
+        const result = stmt.get('last_server_status') as { value: string } | undefined;
+        return result?.value;
+    }
+};

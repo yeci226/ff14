@@ -1,0 +1,21 @@
+{
+  "botId": "ff14",
+  "generatedAt": "2026-03-10T07:30:03.988Z",
+  "commands": [
+    {
+      "name": "/bind",
+      "sourceFile": "src/commands/news/bind.ts",
+      "updatedAt": "2025-12-04T09:42:41.210Z"
+    },
+    {
+      "name": "/item",
+      "sourceFile": "src/commands/item.ts",
+      "updatedAt": "2025-12-11T16:51:31.071Z"
+    },
+    {
+      "name": "/unbind",
+      "sourceFile": "src/commands/news/unbind.ts",
+      "updatedAt": "2025-12-04T09:49:19.175Z"
+    }
+  ]
+}

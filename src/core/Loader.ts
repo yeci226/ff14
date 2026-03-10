@@ -12,7 +12,7 @@ export class Loader {
         this.logger = new Logger('Loader');
     }
 
-    async load() {
+    async load(token: string, clientId: string) {
         // Load Events
         const eventsPath = path.join(process.cwd(), 'src', 'events', '*.ts').replace(/\\/g, '/');
         const eventFiles = await glob(eventsPath);
@@ -47,13 +47,13 @@ export class Loader {
         this.logger.success(`已載入 ${commands.length} 個指令`);
 
         // Register Commands
-        const rest = new REST().setToken(process.env.DISCORD_TOKEN!);
+        const rest = new REST().setToken(token);
 
         try {
             this.logger.info('開始重新整理應用程式 (/) 指令');
 
             await rest.put(
-                Routes.applicationCommands(process.env.CLIENT_ID!),
+                Routes.applicationCommands(clientId),
                 { body: commands },
             );
 

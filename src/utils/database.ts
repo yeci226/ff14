@@ -9,7 +9,14 @@ const db = new Database(dbPath);
 db.exec(`
     CREATE TABLE IF NOT EXISTS guild_config (
         guild_id TEXT PRIMARY KEY,
-        news_channels TEXT -- JSON array of channel IDs
+        news_channels TEXT -- JSON array of channel IDs (Deprecated)
+    );
+
+    CREATE TABLE IF NOT EXISTS news_subscribers (
+        guild_id TEXT,
+        channel_id TEXT,
+        bound_at INTEGER,
+        PRIMARY KEY (guild_id, channel_id)
     );
     
     -- New Normalized Schema
@@ -103,7 +110,37 @@ try {
         })();
 
         console.log('Migration to normalized schema complete.');
+    } // End of Migration 1
+
+    // Migration 2: Guild Config -> News Subscribers
+    const subscriberCheck = db.prepare("SELECT count(*) as count FROM news_subscribers").get() as { count: number };
+    const guildConfigCheck = db.prepare("SELECT count(*) as count FROM guild_config").get() as { count: number };
+    
+    // Only run if subscribers table is empty but we have legacy config
+    if (subscriberCheck.count === 0 && guildConfigCheck.count > 0) {
+        console.log('Migrating guild_config to news_subscribers...');
+        const legacyConfigs = db.prepare("SELECT * FROM guild_config").all() as { guild_id: string, news_channels: string }[];
+        const insertSub = db.prepare("INSERT OR IGNORE INTO news_subscribers (guild_id, channel_id, bound_at) VALUES (?, ?, ?)");
+
+        db.transaction(() => {
+            for (const config of legacyConfigs) {
+                try {
+                    const channels = JSON.parse(config.news_channels);
+                    if (Array.isArray(channels)) {
+                        for (const channelId of channels) {
+                            // Set bound_at to 0 for existing channels so they receive messages as generic 'old' channels
+                            insertSub.run(config.guild_id, channelId, 0);
+                        }
+                    }
+                } catch (e) {
+                    console.error(`Failed to parse legacy config for guild ${config.guild_id}`, e);
+                }
+            }
+            // Optional: db.exec("DROP TABLE guild_config"); // Keep for safety for now
+        })();
+        console.log('Migration to news_subscribers complete.');
     }
+
 } catch (e: any) {
     if (!e.message.includes('no such table')) {
         console.error('Migration failed:', e);
@@ -132,43 +169,96 @@ export interface NewsDispatch {
 }
 
 export const database = {
-    // Guild Config
+    // Guild Config / Subscriptions
     setNewsChannels: (guildId: string, channelIds: string[]) => {
-        const stmt = db.prepare('INSERT OR REPLACE INTO guild_config (guild_id, news_channels) VALUES (?, ?)');
-        stmt.run(guildId, JSON.stringify(channelIds));
+        // Legacy: Update guild_config (keep for backup for a while)
+        const stmtLegacy = db.prepare('INSERT OR REPLACE INTO guild_config (guild_id, news_channels) VALUES (?, ?)');
+        stmtLegacy.run(guildId, JSON.stringify(channelIds));
+
+        // New Schema: Update news_subscribers
+        const getExisting = db.prepare('SELECT channel_id FROM news_subscribers WHERE guild_id = ?');
+        const insertSub = db.prepare('INSERT OR IGNORE INTO news_subscribers (guild_id, channel_id, bound_at) VALUES (?, ?, ?)');
+        const deleteSub = db.prepare('DELETE FROM news_subscribers WHERE guild_id = ? AND channel_id = ?');
+        // Cleaning up dispatches for removed channels
+        const deleteDispatches = db.prepare('DELETE FROM news_dispatches WHERE channel_id = ?');
+
+        db.transaction(() => {
+            const existingRows = getExisting.all(guildId) as { channel_id: string }[];
+            const existingSet = new Set(existingRows.map(r => r.channel_id));
+            const newSet = new Set(channelIds);
+
+            // Add new channels (not in existing)
+            for (const cid of channelIds) {
+                if (!existingSet.has(cid)) {
+                    insertSub.run(guildId, cid, Date.now());
+                }
+            }
+
+            // Remove old channels (in existing but not in new list)
+            for (const cid of existingSet) {
+                if (!newSet.has(cid)) {
+                    deleteSub.run(guildId, cid);
+                    deleteDispatches.run(cid);
+                }
+            }
+        })();
     },
 
     getNewsChannels: (guildId: string): string[] => {
-        const stmt = db.prepare('SELECT news_channels FROM guild_config WHERE guild_id = ?');
-        const result = stmt.get(guildId) as { news_channels: string } | undefined;
-        return result ? JSON.parse(result.news_channels) : [];
+        // Read from new table
+        const stmt = db.prepare('SELECT channel_id FROM news_subscribers WHERE guild_id = ?');
+        const results = stmt.all(guildId) as { channel_id: string }[];
+        return results.map(r => r.channel_id);
     },
 
-    getAllNewsChannels: (): { guildId: string, channelIds: string[] }[] => {
-        const stmt = db.prepare('SELECT guild_id, news_channels FROM guild_config');
-        const results = stmt.all() as { guild_id: string, news_channels: string }[];
+    getAllSubscriptions: (): { guildId: string, channelId: string, boundAt: number }[] => {
+        const stmt = db.prepare('SELECT guild_id, channel_id, bound_at FROM news_subscribers');
+        const results = stmt.all() as { guild_id: string, channel_id: string, bound_at: number }[];
         return results.map(r => ({
             guildId: r.guild_id,
-            channelIds: JSON.parse(r.news_channels)
+            channelId: r.channel_id,
+            boundAt: r.bound_at || 0
         }));
     },
 
-    removeChannel: (guildId: string, channelId: string) => {
-        const channels = database.getNewsChannels(guildId);
-        const newChannels = channels.filter(id => id !== channelId);
-        database.setNewsChannels(guildId, newChannels);
+    // Deprecated but kept for compatibility if needed elsewhere
+    getAllNewsChannels: (): { guildId: string, channelIds: string[] }[] => {
+        // Synthesize from news_subscribers
+        const stmt = db.prepare('SELECT guild_id, channel_id FROM news_subscribers');
+        const results = stmt.all() as { guild_id: string, channel_id: string }[];
         
-        // Also remove dispatch history for this channel to keep DB clean
-        const stmt = db.prepare('DELETE FROM news_dispatches WHERE channel_id = ?');
-        stmt.run(channelId);
+        const map = new Map<string, string[]>();
+        for (const r of results) {
+             if (!map.has(r.guild_id)) map.set(r.guild_id, []);
+             map.get(r.guild_id)?.push(r.channel_id);
+        }
+
+        return Array.from(map.entries()).map(([guildId, channelIds]) => ({ guildId, channelIds }));
+    },
+
+    removeChannel: (guildId: string, channelId: string) => {
+        const stmtSub = db.prepare('DELETE FROM news_subscribers WHERE guild_id = ? AND channel_id = ?');
+        const stmtDispatch = db.prepare('DELETE FROM news_dispatches WHERE channel_id = ?');
+        
+        // Also update legacy config to keep in sync
+        const channels = database.getNewsChannels(guildId).filter(id => id !== channelId);
+        const stmtLegacy = db.prepare('INSERT OR REPLACE INTO guild_config (guild_id, news_channels) VALUES (?, ?)');
+
+        db.transaction(() => {
+            stmtSub.run(guildId, channelId);
+            stmtDispatch.run(channelId);
+            stmtLegacy.run(guildId, JSON.stringify(channels));
+        })();
     },
 
     removeGuild: (guildId: string) => {
-        const stmtConfig = db.prepare('DELETE FROM guild_config WHERE guild_id = ?');
+        const stmtLegacy = db.prepare('DELETE FROM guild_config WHERE guild_id = ?');
+        const stmtSub = db.prepare('DELETE FROM news_subscribers WHERE guild_id = ?');
         const stmtDispatch = db.prepare('DELETE FROM news_dispatches WHERE guild_id = ?');
         
         db.transaction(() => {
-            stmtConfig.run(guildId);
+            stmtLegacy.run(guildId);
+            stmtSub.run(guildId);
             stmtDispatch.run(guildId);
         })();
     },

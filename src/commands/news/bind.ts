@@ -23,31 +23,42 @@ export default {
     // Get currently bound channels to show in placeholder or message (optional, but good UX)
     const currentChannels = database.getNewsChannels(interaction.guildId);
 
-    // 取得所有可見的文字頻道（最多 100 個）
-    const allTextChannels =
+    // 取得所有可見的可發文頻道（文字+公告，最多 100 個）
+    const selectableChannels =
       interaction.guild?.channels.cache
         .filter(
           (ch) =>
-            ch.type === 0 &&
+            (ch.type === 0 || ch.type === 5) &&
             ch.viewable &&
-            typeof (ch as any).position === "number",
+            typeof (ch as any).rawPosition === "number",
         )
-        .sort((a, b) => (a as any).position - (b as any).position)
+        .sort((a, b) => (a as any).rawPosition - (b as any).rawPosition)
         .first(100) || [];
+
+    const channelOptions = selectableChannels.map((ch) => {
+      const categoryName = ch.parent?.name ? `${ch.parent.name} / ` : "";
+      const label = `${categoryName}${ch.name}`.slice(0, 100);
+      return {
+        label,
+        value: ch.id,
+        default: currentChannels.includes(ch.id),
+      };
+    });
 
     // 分組，每 25 個頻道一組，最多 4 組
     const channelSelectRows = [];
-    for (let i = 0; i < allTextChannels.length; i += 25) {
+    for (let i = 0; i < channelOptions.length; i += 25) {
+      const chunk = channelOptions.slice(i, i + 25);
       channelSelectRows.push({
         type: 1, // Action Row
         components: [
           {
-            type: 8, // Channel Select
+            type: 3, // String Select
             custom_id: `notification_channel_${i / 25 + 1}`,
-            channel_types: [0], // Text Channels
-            placeholder: `選擇文字頻道...（第 ${i / 25 + 1} 組）`,
+            placeholder: `選擇頻道...（第 ${i / 25 + 1} 組）`,
             min_values: 0,
-            max_values: Math.min(25, allTextChannels.length - i),
+            max_values: chunk.length,
+            options: chunk,
           },
         ],
       });
@@ -60,8 +71,8 @@ export default {
         {
           type: 2, // Button
           style: 1, // Primary
-          custom_id: 'notification_channel_confirm',
-          label: '確定',
+          custom_id: "notification_channel_confirm",
+          label: "確定",
         },
       ],
     };
@@ -77,15 +88,15 @@ export default {
                 type: 1,
                 components: [
                   {
-                    type: 8,
+                    type: 3,
                     custom_id: "notification_channel_1",
-                    channel_types: [0],
+                    options: channelOptions.slice(0, 25),
                     placeholder:
                       currentChannels.length > 0
                         ? `目前已綁定 ${currentChannels.length} 個頻道`
-                        : "選擇文字頻道...",
+                        : "選擇頻道...",
                     min_values: 0,
-                    max_values: 25,
+                    max_values: Math.max(1, Math.min(25, channelOptions.length || 1)),
                   },
                 ],
               },

@@ -76,7 +76,7 @@ export class NewsNotifier {
       // Log the reason for update
       if (globalNews?.content_hash !== currentContentHash) {
         this.logger.info(
-          `Hash Changed for ${item.title}: ${globalNews?.content_hash} -> ${currentContentHash}`
+          `Hash Changed for ${item.title}: ${globalNews?.content_hash} -> ${currentContentHash}`,
         );
       }
 
@@ -127,7 +127,7 @@ export class NewsNotifier {
         item,
         sub.boundAt,
         avatarUrl,
-        publisher
+        publisher,
       );
     }
   }
@@ -140,7 +140,7 @@ export class NewsNotifier {
     originalItem: any,
     boundAt: number,
     avatarUrl?: string,
-    publisher?: string
+    publisher?: string,
   ) {
     const dispatch = database.getDispatch(globalNews.id, channelId);
 
@@ -150,7 +150,7 @@ export class NewsNotifier {
       blocks,
       globalNews.published_at,
       avatarUrl,
-      publisher
+      publisher,
     );
 
     if (dispatch) {
@@ -158,7 +158,7 @@ export class NewsNotifier {
       if (dispatch.last_hash !== globalNews.content_hash) {
         try {
           const channel = (await this.client.channels.fetch(
-            channelId
+            channelId,
           )) as TextChannel;
           if (channel && channel.isTextBased()) {
             const message = await channel.messages.fetch(dispatch.message_id);
@@ -166,7 +166,7 @@ export class NewsNotifier {
               // @ts-ignore
               await message.edit(payload);
               this.logger.success(
-                `已更新新聞訊息 ${channel.name} (${globalNews.title})`
+                `已更新新聞訊息 ${channel.name} (${globalNews.title})`,
               );
 
               // Update dispatch record
@@ -186,7 +186,7 @@ export class NewsNotifier {
             error.code === 50013
           ) {
             this.logger.warn(
-              `Removing invalid channel ${channelId} (Error: ${error.code}) from guild ${guildId}`
+              `Removing invalid channel ${channelId} (Error: ${error.code}) from guild ${guildId}`,
             );
             database.removeChannel(guildId, channelId);
           } else {
@@ -211,13 +211,13 @@ export class NewsNotifier {
       if (isRecentNews) {
         try {
           const channel = (await this.client.channels.fetch(
-            channelId
+            channelId,
           )) as TextChannel;
           if (channel && channel.isTextBased()) {
             // @ts-ignore
             const message = await channel.send(payload);
             this.logger.success(
-              `已發送新聞至 ${channel.name} (${globalNews.title})`
+              `已發送新聞至 ${channel.name} (${globalNews.title})`,
             );
 
             database.saveDispatch({
@@ -237,7 +237,7 @@ export class NewsNotifier {
             error.code === 50013
           ) {
             this.logger.warn(
-              `Removing invalid channel ${channelId} (Error: ${error.code}) from guild ${guildId}`
+              `Removing invalid channel ${channelId} (Error: ${error.code}) from guild ${guildId}`,
             );
             database.removeChannel(guildId, channelId);
           } else {
@@ -256,7 +256,7 @@ export class NewsNotifier {
     blocks: any[],
     timestamp: number,
     avatarUrl?: string,
-    publisher?: string
+    publisher?: string,
   ) {
     const { formatNewsContent } = await import("../utils/formatter");
 
@@ -290,22 +290,27 @@ export class NewsNotifier {
       content: `-# ${signature}\n<t:${Math.floor(timestamp / 1000)}:f>`,
     });
 
-    const headerSection: any = {
-      type: 9, // ComponentType.SECTION
-      components: headerTextComponents,
-    };
+    const isValidAvatar =
+      typeof avatarUrl === "string" &&
+      avatarUrl.trim().length > 0 &&
+      avatarUrl.length <= 2048 &&
+      /^https?:\/\//.test(avatarUrl);
 
-    if (avatarUrl) {
-      headerSection.accessory = {
-        type: 11, // ComponentType.THUMBNAIL
-        media: {
-          url: avatarUrl,
+    if (isValidAvatar) {
+      mainContainerComponents.push({
+        type: 9,
+        components: headerTextComponents,
+        accessory: {
+          type: 11,
+          media: {
+            url: avatarUrl,
+          },
         },
-      };
+      });
+    } else {
+      // ⚠️ fallback：不用 section
+      mainContainerComponents.push(...headerTextComponents);
     }
-
-    // Add Header Section to Main Container
-    mainContainerComponents.push(headerSection);
 
     // Add Separator immediately after Header Section
     mainContainerComponents.push({
@@ -392,7 +397,7 @@ export class NewsNotifier {
         if (formattedText.includes("親愛的光之戰士，您好：")) {
           formattedText = formattedText.replace(
             "親愛的光之戰士，您好：",
-            "# 親愛的光之戰士，您好："
+            "# 親愛的光之戰士，您好：",
           );
         }
 

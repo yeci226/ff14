@@ -49,30 +49,51 @@ export default {
             } catch (error) {
                 console.error(error);
             }
-        } else if (interaction.isChannelSelectMenu()) {
-            if (interaction.customId === 'notification_channel') {
-                if (!interaction.guildId) return;
+        } else if (interaction.isChannelSelectMenu() || interaction.isButton()) {
+            // 多 action row 頻道選單：收集所有 action row 的選擇，僅在按下「確定」時才處理
+            if (!interaction.guildId) return;
+            const { database } = await import('../utils/database');
+            const guild = interaction.guild;
+            if (!guild) return;
 
-                const selectedChannels = interaction.values;
-                const { database } = await import('../utils/database');
-                
+            // @ts-ignore
+            const cache = globalThis.__bindChannelCache ?? (globalThis.__bindChannelCache = {});
+
+            // 收集 action row 的選擇
+            if (interaction.isChannelSelectMenu()) {
+                // 用 ephemeral message 的 message id 當 session key
+                const sessionKey = `bind_channels_${interaction.user.id}_${interaction.message.id}`;
+                // 儲存本 action row 的選擇
+                cache[sessionKey] = cache[sessionKey] || {};
+                cache[sessionKey][interaction.customId] = interaction.values;
+                // 不回覆，等用戶按下確定
+                await interaction.deferUpdate();
+                return;
+            }
+
+            // 按下「確定」按鈕時，彙整所有 action row 的選擇
+            if (interaction.isButton() && interaction.customId === 'notification_channel_confirm') {
+                const sessionKey = `bind_channels_${interaction.user.id}_${interaction.message.id}`;
+                const allSelected: string[] = [];
+                if (cache[sessionKey]) {
+                    for (const arr of Object.values(cache[sessionKey])) {
+                        allSelected.push(...(arr as string[]));
+                    }
+                }
+
                 // Validate Permissions
                 const validChannels: string[] = [];
                 const invalidChannels: string[] = [];
-                
-                const guild = interaction.guild;
-                if (!guild) return;
 
-                // We need to fetch channels to check permissions
-                for (const channelId of selectedChannels) {
+                for (const channelId of allSelected) {
                     try {
                         const channel = await guild.channels.fetch(channelId);
                         if (!channel) continue;
 
                         const permissions = channel.permissionsFor(interaction.client.user?.id!);
                         if (!permissions) {
-                             invalidChannels.push(`<#${channelId}> (無法確認權限)`);
-                             continue;
+                            invalidChannels.push(`<#${channelId}> (無法確認權限)`);
+                            continue;
                         }
 
                         const hasView = permissions.has(PermissionFlagsBits.ViewChannel);
@@ -98,20 +119,19 @@ export default {
 
                 // Build Status Message
                 const components: any[] = [];
-                
                 // Success Message
                 if (validChannels.length > 0) {
-                     components.push({
+                    components.push({
                         type: 10,
                         content: `✅ **設定已更新**\n已綁定以下頻道接收通知：\n${validChannels.map(id => `<#${id}>`).join('\n')}`
                     });
-                } else if (selectedChannels.length > 0 && validChannels.length === 0) {
-                     components.push({
+                } else if (allSelected.length > 0 && validChannels.length === 0) {
+                    components.push({
                         type: 10,
                         content: `❌ **設定失敗**\n所有選擇的頻道皆無效，請檢查機器人權限。`
                     });
                 } else {
-                     components.push({
+                    components.push({
                         type: 10,
                         content: `✅ **設定已更新**\n已取消所有頻道綁定`
                     });
@@ -124,7 +144,7 @@ export default {
                         divider: true,
                         spacing: 1
                     });
-                     components.push({
+                    components.push({
                         type: 10,
                         content: `⚠️ **以下頻道無法綁定** (權限不足)：\n${invalidChannels.join('\n')}\n請確保機器人擁有「檢視頻道」、「發送訊息」及「嵌入連結」權限。`
                     });
@@ -144,6 +164,8 @@ export default {
 
                 // @ts-ignore
                 await interaction.update(payload);
+                // 清除快取
+                delete cache[sessionKey];
             }
         }
     },

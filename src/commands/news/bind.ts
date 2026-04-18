@@ -74,6 +74,12 @@ export default {
           custom_id: "notification_channel_confirm",
           label: "確定",
         },
+        {
+          type: 2, // Button
+          style: 2, // Secondary
+          custom_id: "notification_bind_current",
+          label: "綁定當前頻道",
+        },
       ],
     };
 
@@ -96,7 +102,10 @@ export default {
                         ? `目前已綁定 ${currentChannels.length} 個頻道`
                         : "選擇頻道...",
                     min_values: 0,
-                    max_values: Math.max(1, Math.min(25, channelOptions.length || 1)),
+                    max_values: Math.max(
+                      1,
+                      Math.min(25, channelOptions.length || 1),
+                    ),
                   },
                 ],
               },

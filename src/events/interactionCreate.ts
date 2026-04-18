@@ -63,6 +63,66 @@ export default {
         console.error(error);
       }
     } else if (
+      interaction.isButton() &&
+      interaction.customId === "notification_bind_current"
+    ) {
+      if (!interaction.guildId || !interaction.channelId) return;
+      const { database } = await import("../utils/database");
+      const guild = interaction.guild;
+      if (!guild) return;
+
+      const channelId = interaction.channelId;
+      let errorMsg: string | null = null;
+
+      try {
+        const channel = await guild.channels.fetch(channelId);
+        if (!channel) {
+          errorMsg = "無法取得當前頻道資訊";
+        } else {
+          const permissions = channel.permissionsFor(
+            interaction.client.user?.id!,
+          );
+          if (!permissions) {
+            errorMsg = "無法確認機器人在此頻道的權限";
+          } else {
+            const missing: string[] = [];
+            if (!permissions.has(PermissionFlagsBits.ViewChannel))
+              missing.push("檢視頻道");
+            if (!permissions.has(PermissionFlagsBits.SendMessages))
+              missing.push("發送訊息");
+            if (!permissions.has(PermissionFlagsBits.EmbedLinks))
+              missing.push("嵌入連結");
+
+            if (missing.length > 0) {
+              errorMsg = `機器人在此頻道缺少以下權限：${missing.join(", ")}`;
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`Error checking permissions for channel ${channelId}:`, e);
+        errorMsg = "檢查頻道權限時發生錯誤";
+      }
+
+      let resultContent: string;
+      if (errorMsg) {
+        resultContent = `❌ **綁定失敗**\n${errorMsg}`;
+      } else {
+        const existing = database.getNewsChannels(interaction.guildId);
+        if (!existing.includes(channelId)) {
+          database.setNewsChannels(interaction.guildId, [
+            ...existing,
+            channelId,
+          ]);
+        }
+        resultContent = `✅ **已綁定當前頻道**\n<#${channelId}> 將接收 FFXIV 最新消息通知`;
+      }
+
+      // @ts-ignore
+      await interaction.reply({
+        content: resultContent,
+        flags: MessageFlags.Ephemeral,
+      });
+    } else if (
       (interaction.isStringSelectMenu() &&
         interaction.customId.startsWith("notification_channel_")) ||
       (interaction.isButton() &&

@@ -40,6 +40,13 @@ db.exec(`
         FOREIGN KEY(news_id) REFERENCES global_news(id)
     );
 
+    CREATE TABLE IF NOT EXISTS news_send_claims (
+        news_id TEXT,
+        channel_id TEXT,
+        claimed_at INTEGER,
+        PRIMARY KEY (news_id, channel_id)
+    );
+
     CREATE TABLE IF NOT EXISTS news_state (
         key TEXT PRIMARY KEY,
         value TEXT
@@ -303,6 +310,29 @@ export const database = {
                 last_hash = excluded.last_hash
         `);
         stmt.run(dispatch);
+    },
+
+    tryClaimDispatchSend: (newsId: string, channelId: string, ttlMs: number = 10 * 60 * 1000): boolean => {
+        const now = Date.now();
+        const expireBefore = now - ttlMs;
+        const cleanupExpired = db.prepare('DELETE FROM news_send_claims WHERE claimed_at < ?');
+        const claimStmt = db.prepare(`
+            INSERT OR IGNORE INTO news_send_claims (news_id, channel_id, claimed_at)
+            VALUES (?, ?, ?)
+        `);
+
+        const tx = db.transaction(() => {
+            cleanupExpired.run(expireBefore);
+            const result = claimStmt.run(newsId, channelId, now);
+            return result.changes === 1;
+        });
+
+        return tx();
+    },
+
+    releaseDispatchSendClaim: (newsId: string, channelId: string) => {
+        const stmt = db.prepare('DELETE FROM news_send_claims WHERE news_id = ? AND channel_id = ?');
+        stmt.run(newsId, channelId);
     },
 
     // Legacy support / General State

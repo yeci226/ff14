@@ -10,6 +10,7 @@ export class NewsNotifier {
   private client: Client;
   private logger: Logger;
   private interval: NodeJS.Timeout | null = null;
+  private isChecking = false;
 
   constructor(client: Client) {
     this.client = client;
@@ -17,8 +18,13 @@ export class NewsNotifier {
   }
 
   start() {
+    if (this.interval) {
+      this.logger.warn("新聞輪詢服務已在執行中，略過重複啟動");
+      return;
+    }
+
     this.logger.info("開始新聞輪詢服務...");
-    this.checkNews();
+    void this.checkNews();
     this.interval = setInterval(() => this.checkNews(), POLLING_INTERVAL);
   }
 
@@ -30,24 +36,37 @@ export class NewsNotifier {
   }
 
   public async checkNews() {
-    this.logger.info("檢查新聞中...");
-    const newsList = await getLatestNews();
-
-    if (newsList.length === 0) {
-      this.logger.warn("未發現新聞");
+    if (this.isChecking) {
+      this.logger.warn("上一輪新聞檢查尚未完成，略過本次輪詢");
       return;
     }
 
-    // Process top 3 news items
-    const recentNews = newsList.slice(0, 3).reverse();
+    this.isChecking = true;
 
-    // Check if this is the very first run (no global news at all)
-    // If so, we might want to skip notifications to avoid spamming everything
-    const history = database.getRecentGlobalNews(1);
-    const isFirstRun = history.length === 0;
+    this.logger.info("檢查新聞中...");
+    try {
+      const newsList = await getLatestNews();
 
-    for (const item of recentNews) {
-      await this.processNewsItem(item, isFirstRun);
+      if (newsList.length === 0) {
+        this.logger.warn("未發現新聞");
+        return;
+      }
+
+      // Process top 3 news items
+      const recentNews = newsList.slice(0, 3).reverse();
+
+      // Check if this is the very first run (no global news at all)
+      // If so, we might want to skip notifications to avoid spamming everything
+      const history = database.getRecentGlobalNews(1);
+      const isFirstRun = history.length === 0;
+
+      for (const item of recentNews) {
+        await this.processNewsItem(item, isFirstRun);
+      }
+    } catch (error) {
+      this.logger.error(`新聞檢查失敗：${error}`);
+    } finally {
+      this.isChecking = false;
     }
   }
 
@@ -209,6 +228,14 @@ export class NewsNotifier {
       const isRecentNews = newsAge < 48 * 60 * 60 * 1000; // 48 hours
 
       if (isRecentNews) {
+        const claimed = database.tryClaimDispatchSend(globalNews.id, channelId);
+        if (!claimed) {
+          this.logger.info(
+            `跳過重複發送（已有其他實例處理中）：${channelId} (${globalNews.title})`,
+          );
+          return;
+        }
+
         try {
           const channel = (await this.client.channels.fetch(
             channelId,
@@ -243,6 +270,8 @@ export class NewsNotifier {
           } else {
             this.logger.error(`發送通知至頻道 ${channelId} 失敗：${error}`);
           }
+        } finally {
+          database.releaseDispatchSendClaim(globalNews.id, channelId);
         }
       } else {
         // Determine why we are skipping to log it (debug)
